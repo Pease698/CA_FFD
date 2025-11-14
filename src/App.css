@@ -15,7 +15,7 @@
 
 .App-header {
   background-color: #282c34;
-  min-height: 100vh;
+  /*min-height: 100vh;*/
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -35,4 +35,25 @@
   to {
     transform: rotate(360deg);
   }
+}
+
+#main-container {
+  display: flex;
+  /* 确保容器占满父元素的高度，例如视口高度 */
+  height: 100vh; 
+  width: 100vw;
+}
+
+#left-scene-container {
+  /* 70% 宽度 */
+  flex: 7; 
+  background-color: #222; /* 可选的背景色 */
+}
+
+#right-controls-container {
+  /* 30% 宽度 */
+  flex: 3; 
+  padding: 15px;
+  overflow-y: auto; /* 控制面板内容多时可以滚动 */
+  background-color: #f0f0f0; /* 控制面板背景色 */
 }
