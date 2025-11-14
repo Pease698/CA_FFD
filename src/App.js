@@ -5,7 +5,7 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import { useGLTF } from '@react-three/drei';
 import { Scene } from 'three';
-import React, { useRef, useMemo, useState} from 'react';
+import React, { useRef, useMemo, useState, createRef} from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Points, PointMaterial, Line} from '@react-three/drei';
 import * as THREE from 'three';
@@ -17,7 +17,7 @@ function Model({ url, controlPoints }) {
   // 加载模型数据
   const { scene } = useGLTF(url);
 
-  // ⚠️ 核心变形逻辑：使用 useMemo 确保只有 controlPoints 变化时才重新计算顶点
+  // 核心变形逻辑：使用 useMemo 确保只有 controlPoints 变化时才重新计算顶点
   useMemo(() => {
     
     // ----------------------------------------------------
@@ -144,56 +144,105 @@ function generateFFDControlGeometry(
  * @param {Array<number>} initialPosition - 初始位置 [x, y, z]
  * @param {Function} onDrag - 拖拽结束时调用的回调函数 (newPosition) => {...}
  */
-function FFDPoint({ index, initialPosition, onDrag, setOrbitEnabled }) {
+function FFDPoint({
+  index,
+  initialPosition,
+  onDrag,
+  setOrbitEnabled,
+  onSelect,        // 新增：通知父组件“我被选中了”
+  isSelected,      // 新增：父组件告诉我“我是否被选中”
+}) {
   const meshRef = useRef();
-  const controlsRef = useRef();
+  // const controlsRef = useRef();
   
-  // 确保 TransformControls 能够访问到相机和DOM元素
-  // R3F 最佳实践：使用 useThree 访问状态
-  const { camera, gl, scene } = useThree(); // <--- 增加了 scene
-
-  // 当组件被创建时，设置其初始位置
-  useMemo(() => {
-    if (meshRef.current) {
-      meshRef.current.position.set(...initialPosition);
-    }
-  }, [initialPosition]);
-
   // 处理拖拽开始和结束的逻辑
-  const handleDragEnd = (event) => {
+  const handleDragEnd = () => {
     // 拖拽结束时，获取当前 Mesh 的位置
     const newPosition = meshRef.current.position;
     onDrag(index, [newPosition.x, newPosition.y, newPosition.z]);
-
     setOrbitEnabled(true);
   };
   
-  const handleDraggingChanged = (event) => {
+  const handleDraggingChanged = () => {
     setOrbitEnabled(false);
   };
 
   return (
-    // TransformControls 必须包裹一个 THREE.Object3D (如 Mesh)
-    <TransformControls 
-      ref={controlsRef}
-      mode="translate" // 仅允许移动，禁用旋转和缩放
-      showX={true}
-      showY={true}
-      showZ={true}
-      onMouseUp={handleDragEnd}
-      onMouseDown={handleDraggingChanged}
-    >
-      <mesh ref={meshRef}>
+    // // TransformControls 必须包裹一个 THREE.Object3D (如 Mesh)
+    // <TransformControls 
+    //   key={index}
+    //   ref={controlsRef}
+    //   mode="translate" // 仅允许移动，禁用旋转和缩放
+    //   showX={true}
+    //   showY={true}
+    //   showZ={true}
+    //   onMouseUp={handleDragEnd}
+    //   onMouseDown={handleDraggingChanged}
+    // >
+    <group>
+      <mesh
+        ref={meshRef}
+        position={initialPosition}
+        onClick={(e) => {
+          e.stopPropagation(); // 阻止事件冒泡（非常重要！）
+          onSelect(index);
+        }}
+      >
         {/* 使用简单的几何体来表示控制点，例如球体 */}
         <sphereGeometry args={[0.8]} /> 
         <meshBasicMaterial 
-          color="red" // 控制点颜色
+          color={isSelected ? 'red' : "white"}
           depthTest={true} // 确保它总是在最前面
           transparent={false}
           opacity={0.8}
         />
       </mesh>
-    </TransformControls>
+      
+      {/* 2. *有条件地* 渲染 TransformControls */}
+      {/* 只有当这个点被选中时，才创建和显示 TransformControls */}
+      {isSelected && (
+        <TransformControls 
+          mode="translate"
+          showX={isSelected}
+          showY={true}
+          showZ={true}
+          object={meshRef} // 关键：将 controls 附加到 meshRef 上
+          onMouseUp={handleDragEnd}
+          onMouseDown={handleDraggingChanged}
+        />
+      )}
+    </group>
+  );
+}
+
+function FFDManager({ controlPoints, onPointDrag, selectedIndex, setSelectedIndex, setOrbitEnabled }) {
+  
+  // const [controlPoints, setPoints] = useState(initialPoints);
+  
+  // 拖拽结束时更新点的位置
+  // const handleDrag = (index, newPosition) => {
+  //   const newPoints = [...controlPoints];
+  //   newPoints[index] = newPosition;
+  //   setPoints(newPoints);
+  // };
+  
+  return (
+    <>
+      {/* 渲染所有点 */}
+      {controlPoints.map((pos, index) => (
+        <FFDPoint
+          key={index}
+          index={index}
+          initialPosition={pos}
+          onDrag={onPointDrag}
+          setOrbitEnabled={setOrbitEnabled}
+          
+          // 传入状态
+          isSelected={index == selectedIndex}
+          onSelect={setSelectedIndex}
+        />
+      ))}
+    </>
   );
 }
 
@@ -220,6 +269,7 @@ function FFDControl({
       {/* 绘制控制顶点 */}
       {controlPoints.map((pos, index) => (
         <FFDPoint
+          key={index}
           index={index}
           initialPosition={pos}
           onDrag={onPointDrag}
@@ -260,6 +310,13 @@ function App() {
 
   const [controlPoints, setControlPoints] = useState(initialPoints);
   const [orbitEnabled, setOrbitEnabled] = useState(true); // 声明状态
+  const [selectedIndex, setSelectedIndex] = useState(-1);
+
+  // 2. 这是在 Canvas“背景”上点击时触发的函数
+  // const handleCanvasClick = (e) => {
+  //   // 调用此函数意味着点击没有命中任何 FFDPoint
+  //   setSelectedIndex(-1); 
+  // };
 
   // 2. 定义更新 controlPoints 的函数
   const handlePointDrag = (index, newPosition) => {
@@ -277,7 +334,7 @@ function App() {
   return (
     <div id="main-container" style={{ display: 'flex', height: '100vh', width: '100vw' }}>
       <div id="left-scene-container" style={{ flex: 7, backgroundColor: '#222' }}>
-        <Canvas camera={{ position: [30, 30, 30], fov: 75 }}>
+        <Canvas camera={{ position: [30, 30, 30], fov: 75 }} >
           <OrbitControls enabled={orbitEnabled} />
           <ambientLight intensity={0.5} />
           <pointLight position={[10, 10, 10]} />
@@ -286,15 +343,12 @@ function App() {
           <Model url="./book/scene.gltf" controlPoints={controlPoints} />
 
           {/* 绘制 FFD 控制顶点和网格线 */}
-          <FFDControl
-            gridSize={gridSize} // 示例：3x3x3 的 FFD 笼子
-            bboxMin={bboxMin} // 假设 FFD 笼子的最小边界
-            bboxMax={bboxMax}   // 假设 FFD 笼子的最大边界
-            pointSize={1}
-            // 传递状态
-            controlPoints={controlPoints} 
-            // 传递更新函数 (这个函数将传递给 FFDPoint 组件)
+          <FFDManager 
+            // 4. 将状态和设置器(setter)传递给 FFDManager
+            controlPoints={controlPoints}
             onPointDrag={handlePointDrag}
+            selectedIndex={selectedIndex}
+            setSelectedIndex={setSelectedIndex}
             setOrbitEnabled={setOrbitEnabled}
           />
         </Canvas>
