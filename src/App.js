@@ -12,7 +12,7 @@ import * as THREE from 'three';
 import { Segments, Segment } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
 import { TransformControls } from '@react-three/drei';
-import { useLayoutEffect } from 'react';
+import { useLayoutEffect, useEffect } from 'react';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 
 // 计算二项式系数
@@ -116,12 +116,53 @@ function calculateDeformedPosition(controlPoints, s, t, u, gridSize) {
   return deformedPos;
 }
 
+const loader = new GLTFLoader();
+
 function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
-  // 1. 加载原始场景
-  const { scene: originalScene } = useGLTF(url);
+  // // 1. 加载原始场景
+  // const { scene: originalScene } = useGLTF(url);
+
+  // 1. 用 State 替换 useGLTF
+  //    我们需要一个 state 来存储异步加载的原始场景
+  const [originalScene, setOriginalScene] = useState(null);
+
+  // 2. 使用 useEffect 来触发命令式加载
+  //    这个 effect 会在 'url' prop 发生变化时运行
+  useEffect(() => {
+    if (!url) {
+      // 如果没有 url，则清理场景
+      setOriginalScene(null);
+      return;
+    }
+
+    // 在开始加载新模型之前，立即清除旧模型
+    // 这模拟了 `loadModel` 中的 `scene.remove(objectScene)` 逻辑
+    setOriginalScene(null);
+
+    // --- 这就是 `loadModel` 的核心逻辑 ---
+    loader.load(
+      url,
+      // 成功回调 (m) -> (gltf)
+      (gltf) => {
+        // 加载成功后，将其设置到我们的 state 中
+        // 这将触发 useMemo 链的重新计算
+        setOriginalScene(gltf.scene);
+      },
+      // (可选) onProgress 回调
+      undefined,
+      // (可选) onError 回调
+      (error) => {
+        console.error(`加载模型 ${url} 时出错:`, error);
+        setOriginalScene(null); // 出错时也确保清理
+      }
+    );
+    
+  }, [url]); // 仅在 `url` 变化时重新运行此 effect
 
   // 2. 深度克隆原始场景，用于变形和渲染
   const bakedScene = useMemo(() => {
+    if(!originalScene) return null;
+
     const scene = originalScene.clone(true); // 克隆
     const objectsToConvert = [];
 
@@ -201,6 +242,7 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
   // 这是我们将要实际修改并渲染的场景
   const deformedScene = useMemo(() => {
     // console.log("Step 3: Cloning baked scene AND its geometries...");
+    if(!bakedScene) return null;
     
     // 1. 克隆场景结构 (这仍然会共享几何体)
     const scene = bakedScene.clone(true);
@@ -223,6 +265,11 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
   // 4. 预计算 STU 坐标
   const geometryData = useMemo(() => {
     // console.log("Step 4: Pre-calculating STU (Array)...");
+    if (!bakedScene) return []; // 如果没有烘焙场景，返回空数组
+
+    // --- 强制更新场景中所有对象的世界矩阵 ---
+    // 这样我们才能读取到 object.matrixWorld
+    bakedScene.updateMatrixWorld(true);
     
     // 我们将 STU 数据存储在一个数组中，
     // 依赖于 bakedScene 和 deformedScene 具有完全相同的遍历顺序
@@ -231,6 +278,9 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
 
     bakedScene.traverse((object) => {
       if (object.isMesh) {
+        // --- 获取此特定网格的世界变换矩阵 ---
+        const worldMatrix = object.matrixWorld;
+
         // 从 "bakedMesh" (只读源) 读取位置数据
         const positionAttribute = object.geometry.attributes.position; 
         const vertexCount = positionAttribute.count;
@@ -238,6 +288,10 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
         
         for (let j = 0; j < vertexCount; j++) {
           originalVertex.fromBufferAttribute(positionAttribute, j);
+
+          // --- 将局部坐标转换（应用）为世界坐标 ---
+          originalVertex.applyMatrix4(worldMatrix);
+
           const [s, t, u] = calculateSTU(originalVertex, bboxMin, bboxMax);
           stuArray[j * 3 + 0] = s;
           stuArray[j * 3 + 1] = t;
@@ -255,6 +309,10 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
   // 5. 核心变形逻辑
   React.useLayoutEffect(() => {
     // console.log("Step 5: Applying deformation (Array)...");
+    // 增加防护条件，因为 deformedScene 和 geometryData 现在可能是 null/[]
+    if (!deformedScene || !geometryData.length || !controlPoints) {
+      return; 
+    }
     
     const stu = new THREE.Vector3();
     let meshIndex = 0; // <--- 用于跟踪 STU 数组的索引
@@ -296,10 +354,8 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
     });
     
   }, [controlPoints, geometryData, gridSize]);
-
-  return (
-    <primitive object={deformedScene} scale={1} />
-  );
+  
+  return deformedScene ? <primitive object={deformedScene} /> : null;
 }
 
 function SceneContainer() { // main component of the 3D scene
