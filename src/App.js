@@ -12,6 +12,8 @@ import * as THREE from 'three';
 import { Segments, Segment } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
 import { TransformControls } from '@react-three/drei';
+import { useLayoutEffect } from 'react';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
 
 // 计算二项式系数
 function binomial(n, k) {
@@ -114,169 +116,186 @@ function calculateDeformedPosition(controlPoints, s, t, u, gridSize) {
   return deformedPos;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
   // 1. 加载原始场景
   const { scene: originalScene } = useGLTF(url);
 
   // 2. 深度克隆原始场景，用于变形和渲染
-  // 这个 useMemo 仅在 originalScene 加载时运行一次
-  const deformedScene = useMemo(() => {
-    // console.log("Cloning scene...");
-    return originalScene.clone(true);
+  const bakedScene = useMemo(() => {
+    const scene = originalScene.clone(true); // 克隆
+    const objectsToConvert = [];
+
+    // 1. 找到所有 InstancedMesh
+    scene.traverse((object) => {
+      if (object.isInstancedMesh) {
+        objectsToConvert.push(object);
+      }
+    });
+
+    // // 2. 转换
+    // objectsToConvert.forEach(instancedMesh => {
+    //   const parent = instancedMesh.parent;
+
+    //   for (let i = 0; i < instancedMesh.count; i++) {
+    //     const matrix = new THREE.Matrix4();
+    //     instancedMesh.getMatrixAt(i, matrix); // 获取实例矩阵
+
+    //     const newMesh = new THREE.Mesh(
+    //       instancedMesh.geometry.clone(), // 克隆几何体
+    //       instancedMesh.material         // 共享材质 (或克隆)
+    //     );
+
+    //     newMesh.geometry.applyMatrix4(matrix); // 烘焙变换
+
+    //     // 继承原 InstancedMesh 的其他属性
+    //     newMesh.name = `${instancedMesh.name}_instance_${i}`;
+    //     // ... (position, rotation, scale 应该被 applyMatrix4 重置了)
+
+    //     parent.add(newMesh); // 添加到场景
+    //   }
+
+    //   // 3. 移除原始的 InstancedMesh
+    //   parent.remove(instancedMesh);
+    // });
+
+    // 2. 转换
+    objectsToConvert.forEach(instancedMesh => {
+      const parent = instancedMesh.parent;
+      
+      // 获 InstancedMesh 对象的本地变换矩阵
+      const baseMatrix = instancedMesh.matrix.clone();
+      
+      const instanceMatrix = new THREE.Matrix4();
+      const bakedMatrix = new THREE.Matrix4();
+
+      for (let i = 0; i < instancedMesh.count; i++) {
+        
+        instancedMesh.getMatrixAt(i, instanceMatrix); // 获取实例矩阵 [Instance.matrix]
+
+        // 组合变换: [InstancedMesh.matrix] * [Instance.matrix]
+        bakedMatrix.multiplyMatrices(baseMatrix, instanceMatrix);
+
+        const newMesh = new THREE.Mesh(
+          instancedMesh.geometry.clone(), // 克隆几何体
+          instancedMesh.material         // 共享材质
+        );
+
+        // 应用组合后的完整烘焙矩阵
+        newMesh.geometry.applyMatrix4(bakedMatrix); 
+
+        // 继承原 InstancedMesh 的其他属性
+        newMesh.name = `${instancedMesh.name}_instance_${i}`;
+        // ... (position, rotation, scale 保持默认，因为变换已烘焙到顶点)
+
+        parent.add(newMesh); // 添加到场景
+      }
+
+      // 3. 移除原始的 InstancedMesh
+      parent.remove(instancedMesh);
+    });
+
+    return scene;
   }, [originalScene]);
 
+  // 3. 创建 "变形" 场景 (可写目标)
+  // 这是我们将要实际修改并渲染的场景
+  const deformedScene = useMemo(() => {
+    // console.log("Step 3: Cloning baked scene AND its geometries...");
+    
+    // 1. 克隆场景结构 (这仍然会共享几何体)
+    const scene = bakedScene.clone(true);
 
-  // 3. 提取并存储所有原始几何体的顶点数据
-  // (已修复 UUID 不匹配的 bug)
-  const originalGeometries = useMemo(() => {
-    // console.log("Extracting original geometry (Fixed)...");
-    const geoMap = new Map();
-
-    // 1. 将原始网格和克隆网格分别收集到数组中
-    // 我们依赖 .traverse() 对于
-    // 原始对象和克隆对象具有相同的遍历顺序
-    const originalMeshes = [];
-    originalScene.traverse((object) => {
+    // 遍历新克隆的 scene，
+    // 并将每个网格的几何体(geometry)替换为它自己的克隆版本。
+    // 这打破了 deformedScene 和 bakedScene 之间的共享引用。
+    scene.traverse((object) => {
       if (object.isMesh) {
-        originalMeshes.push(object);
+        // object.geometry.clone() 会创建一个新的、
+        // 拥有独立 buffer attributes 的几何体。
+        object.geometry = object.geometry.clone();
       }
     });
 
-    const deformedMeshes = [];
-    deformedScene.traverse((object) => {
-      if (object.isMesh) {
-        deformedMeshes.push(object);
-      }
-    });
+    return scene;
+  }, [bakedScene]);
 
+
+  // 4. 预计算 STU 坐标
+  const geometryData = useMemo(() => {
+    // console.log("Step 4: Pre-calculating STU (Array)...");
     
-
-    // 2. 检查数量是否匹配 (作为安全检查)
-    if (originalMeshes.length !== deformedMeshes.length) {
-      console.error("FFD: Cloned mesh count does not match original!");
-      return geoMap;
-    }
-
-    // 3. 遍历数组，使用 *克隆* 的 UUID 作为键，*原始* 的位置数据作为值
-    for (let i = 0; i < deformedMeshes.length; i++) {
-      const deformedMesh = deformedMeshes[i];
-      const originalMesh = originalMeshes[i];
-      
-      geoMap.set(deformedMesh.uuid, { // 键: 克隆体 (deformedMesh) 的 UUID
-        // 值: 原始体 (originalMesh) 的位置数据
-        originalPosition: originalMesh.geometry.attributes.position.clone()
-      });
-    }
-
-    return geoMap;
-  }, [originalScene, deformedScene]); // 依赖项现在还需要包括 deformedScene
-
-  // // 3. 提取并存储所有原始几何体的顶点数据
-  // // (已修复 UUID 不匹配的 bug) -> 替换为更健壮的基于名称的映射
-  // const originalGeometries = useMemo(() => {
-  //   console.log("Extracting original geometry (Name-based)...");
-  //   const geoMap = new Map();
-
-  //   // 1. 遍历 *原始* 场景，创建一个 "name" -> "originalMesh" 的索引
-  //   const originalMeshMap = new Map();
-  //   originalScene.traverse((object) => {
-  //     if (object.isMesh) {
-  //       // 如果名称已存在，可能会覆盖，但这是更健壮方法的基础
-  //       if (object.name) {
-  //         originalMeshMap.set(object.name, object);
-  //       }
-  //     }
-  //   });
-
-  //   // 2. 遍历 *变形后* 的场景
-  //   deformedScene.traverse((object) => {
-  //     if (object.isMesh) {
-  //       // 3. 使用变形后网格的 name，在索引中查找对应的 *原始* 网格
-  //       const originalMesh = originalMeshMap.get(object.name);
-  //       
-  //       if (originalMesh && originalMesh.geometry.attributes.position) {
-  //         // 4. 建立从 "deformedMesh.uuid" -> "originalMesh.geometry" 的映射
-  //         geoMap.set(object.uuid, { // 键: 克隆体 (deformedMesh) 的 UUID
-  //           // 值: 原始体 (originalMesh) 的位置数据
-  //           originalPosition: originalMesh.geometry.attributes.position.clone()
-  //         });
-  //       } else {
-  //         console.warn(`FFD: Could not find original mesh for: ${object.name}`);
-  //       }
-  //     }
-  //   });
-
-  //   return geoMap;
-  // }, [originalScene, deformedScene]); // 依赖项不变
-
-  // 4. 核心变形逻辑：当 controlPoints 变化时执行
-  // (也依赖其他 FFD 参数)
-  useMemo(() => {
-    // console.log("Deforming model...");
-    
-    // 创建一个可重用的 Vector3，避免在循环中创建成千上万个对象
+    // 我们将 STU 数据存储在一个数组中，
+    // 依赖于 bakedScene 和 deformedScene 具有完全相同的遍历顺序
+    const stuList = [];
     const originalVertex = new THREE.Vector3();
 
-    // 遍历我们 *克隆* 出来的 deformedScene
+    bakedScene.traverse((object) => {
+      if (object.isMesh) {
+        // 从 "bakedMesh" (只读源) 读取位置数据
+        const positionAttribute = object.geometry.attributes.position; 
+        const vertexCount = positionAttribute.count;
+        const stuArray = new Float32Array(vertexCount * 3);
+        
+        for (let j = 0; j < vertexCount; j++) {
+          originalVertex.fromBufferAttribute(positionAttribute, j);
+          const [s, t, u] = calculateSTU(originalVertex, bboxMin, bboxMax);
+          stuArray[j * 3 + 0] = s;
+          stuArray[j * 3 + 1] = t;
+          stuArray[j * 3 + 2] = u;
+        }
+        
+        stuList.push(new THREE.BufferAttribute(stuArray, 3));
+      }
+    });
+
+    return stuList;
+    
+  }, [bakedScene, bboxMin, bboxMax]);
+
+  // 5. 核心变形逻辑
+  React.useLayoutEffect(() => {
+    // console.log("Step 5: Applying deformation (Array)...");
+    
+    const stu = new THREE.Vector3();
+    let meshIndex = 0; // <--- 用于跟踪 STU 数组的索引
+
+    // 遍历 "deformedScene" (可写目标)
     deformedScene.traverse((object) => {
       if (object.isMesh) {
-        // 找到这个 Mesh 对应的原始几何体数据
-        const originalData = originalGeometries.get(object.uuid);
         
-        if (!originalData) {
-          // 如果在 Map 中没找到（例如，这个 mesh 是后来添加的），则跳过
-          return;
+        // 按索引从数组获取 STU 数据
+        const stuAttribute = geometryData[meshIndex];
+        
+        if (!stuAttribute) {
+          // 如果 stuData 数组和网格数量不匹配
+          console.error("FFD: Mesh/STU data mismatch!");
+          return; 
         }
 
-        const { geometry: deformedGeometry, originalPosition: originalPositionAttribute } = originalData;
-        
-        // 获取当前（变形中）的几何体
         const geometry = object.geometry; 
-        
-        // 获取我们要修改的顶点缓冲区
         const deformedPositionAttribute = geometry.attributes.position;
-        const vertexCount = originalPositionAttribute.count;
+        const vertexCount = stuAttribute.count;
 
-        // 3. 对每个顶点应用 FFD 变形
         for (let i = 0; i < vertexCount; i++) {
-          
-          // A. 从 *原始* 缓冲区中获取顶点
-          originalVertex.fromBufferAttribute(originalPositionAttribute, i);
+          stu.fromBufferAttribute(stuAttribute, i);
 
-          // B. FFD 计算步骤：
-          // 1. 计算原始顶点在 FFD 笼子中的参数坐标 (s, t, u)
-          const [s, t, u] = calculateSTU(originalVertex, bboxMin, bboxMax);
-
-          // 2. 使用最新的 controlPoints 和 (s, t, u) 计算新的变形位置 (newX, newY, newZ)
-          const [newX, newY, newZ] = calculateDeformedPosition(controlPoints, s, t, u, gridSize);
+          const [newX, newY, newZ] = calculateDeformedPosition(
+            controlPoints, 
+            stu.x, stu.y, stu.z, 
+            gridSize
+          );
           
-          // 3. 更新 *变形后* 的顶点位置
           deformedPositionAttribute.setXYZ(i, newX, newY, newZ);
         }
 
-        // 4. 标记几何体需要更新
         deformedPositionAttribute.needsUpdate = true;
-        geometry.computeVertexNormals(); // 重新计算法线以保证光照正确
+        geometry.computeVertexNormals(); 
+        
+        meshIndex++; // <--- 移动到下一个网格的 STU 数据
       }
     });
     
-  }, [controlPoints, deformedScene, originalGeometries, gridSize, bboxMin, bboxMax]); // 依赖项
+  }, [controlPoints, geometryData, gridSize]);
 
   return (
     <primitive object={deformedScene} scale={1} />
