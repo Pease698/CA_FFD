@@ -73,7 +73,7 @@ function calculateSTU(originalPos, bboxMin, bboxMax) {
 
 /**
  * 2. 根据 (s, t, u) 和控制点计算变形后的位置
- * @param {Array<Array<number>>} controlPoints - 控制点数组 (27 个 [x, y, z])
+ * @param {Array<Array<number>>} controlPoints - 控制点数组 (ns * nt * nu 个 [x, y, z])
  * @param {number} s - 参数 s
  * @param {number} t - 参数 t
  * @param {number} u - 参数 u
@@ -99,7 +99,7 @@ function calculateDeformedPosition(controlPoints, s, t, u, gridSize) {
         const index = i * (nt * nu) + j * nu + k;
         
         if (index >= controlPoints.length) {
-          console.error("FFD index out of bounds");
+          console.error(`FFD index out of bounds. Index: ${index}, CP Length: ${controlPoints.length}`);
           continue;
         }
         
@@ -172,32 +172,6 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
         objectsToConvert.push(object);
       }
     });
-
-    // // 2. 转换
-    // objectsToConvert.forEach(instancedMesh => {
-    //   const parent = instancedMesh.parent;
-
-    //   for (let i = 0; i < instancedMesh.count; i++) {
-    //     const matrix = new THREE.Matrix4();
-    //     instancedMesh.getMatrixAt(i, matrix); // 获取实例矩阵
-
-    //     const newMesh = new THREE.Mesh(
-    //       instancedMesh.geometry.clone(), // 克隆几何体
-    //       instancedMesh.material         // 共享材质 (或克隆)
-    //     );
-
-    //     newMesh.geometry.applyMatrix4(matrix); // 烘焙变换
-
-    //     // 继承原 InstancedMesh 的其他属性
-    //     newMesh.name = `${instancedMesh.name}_instance_${i}`;
-    //     // ... (position, rotation, scale 应该被 applyMatrix4 重置了)
-
-    //     parent.add(newMesh); // 添加到场景
-    //   }
-
-    //   // 3. 移除原始的 InstancedMesh
-    //   parent.remove(instancedMesh);
-    // });
 
     // 2. 转换
     objectsToConvert.forEach(instancedMesh => {
@@ -358,37 +332,6 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
   return deformedScene ? <primitive object={deformedScene} /> : null;
 }
 
-function SceneContainer() { // main component of the 3D scene
-  return (
-    <Canvas camera={{ position: [30, 30, 30], fov: 75 }}>
-      {/* 引入模型 */}
-      <Model url="./book/scene.gltf" />
-      {/* 引入控制组件 */}
-      <OrbitControls enableZoom={true} enablePan={true} />
-
-      {/* 其他场景元素 */}
-      <ambientLight intensity={0.5} />
-      <pointLight position={[10, 10, 10]} />
-    </Canvas>
-  );
-}
-
-// 假设 FFD 笼子中心在 (0,0,0)，边长为 size
-function generateFFDControlPoints(size = 2) {
-  const halfSize = 10;
-  const points = [];
-
-  // 生成一个 3x3x3 的立方体顶点
-  for (let x = -1; x <= 1; x += 1) {
-    for (let y = -1; y <= 1; y += 1) {
-      for (let z = -1; z <= 1; z += 1) {
-        points.push([x * halfSize, y * halfSize, z * halfSize]);
-      }
-    }
-  }
-  return points; // 这是一个二维数组，每个子数组代表一个点的 [x, y, z]
-}
-
 // 假设我们有一个生成 FFD 控制点和线的函数
 function generateFFDControlGeometry(
   gridSize = [3, 3, 3], // 例如 [3,3,3] 代表一个立方体
@@ -399,10 +342,15 @@ function generateFFDControlGeometry(
   const points = [];
   const lines = [];
 
+  // 确保 ns, nt, nu 至少为 2
+  const l = Math.max(2, ns) - 1;
+  const m = Math.max(2, nt) - 1;
+  const n = Math.max(2, nu) - 1;
+
   // 计算步长
-  const stepS = (bboxMax[0] - bboxMin[0]) / (ns - 1);
-  const stepT = (bboxMax[1] - bboxMin[1]) / (nt - 1);
-  const stepU = (bboxMax[2] - bboxMin[2]) / (nu - 1);
+  const stepS = (l === 0) ? 0 : (bboxMax[0] - bboxMin[0]) / l;
+  const stepT = (m === 0) ? 0 : (bboxMax[1] - bboxMin[1]) / m;
+  const stepU = (n === 0) ? 0 : (bboxMax[2] - bboxMin[2]) / n;
 
   // 生成控制点
   for (let i = 0; i < ns; i ++) {
@@ -415,15 +363,15 @@ function generateFFDControlGeometry(
 
         // 生成网格线段
         // 沿 S 方向
-        if (i < ns - 1) {
+        if (i < l) {
           lines.push([[x, y, z], [x + stepS, y, z]]);
         }
         // 沿 T 方向
-        if (j < nt - 1) {
+        if (j < m) {
           lines.push([[x, y, z], [x, y + stepT, z]]);
         }
         // 沿 U 方向
-        if (k < nu - 1) {
+        if (k < n) {
           lines.push([[x, y, z], [x, y, z + stepU]]);
         }
       }
@@ -447,13 +395,9 @@ function FFDPoint({
   isSelected,      // 新增：父组件告诉我“我是否被选中”
 }) {
   const meshRef = useRef();
-  // const controlsRef = useRef();
   
   // 处理拖拽开始和结束的逻辑
   const handleDragEnd = () => {
-    // 拖拽结束时，获取当前 Mesh 的位置
-    // const newPosition = meshRef.current.position;
-    // onDrag(index, [newPosition.x, newPosition.y, newPosition.z]);
     setOrbitEnabled(true);
   };
   
@@ -469,18 +413,15 @@ function FFDPoint({
     }
   }
 
+  // 当 initialPosition 改变时 (例如 gridSize 改变导致重置), 
+  // 强制更新 meshRef 的位置
+  useEffect(() => {
+    if (meshRef.current) {
+      meshRef.current.position.set(...initialPosition);
+    }
+  }, [initialPosition]);
+
   return (
-    // // TransformControls 必须包裹一个 THREE.Object3D (如 Mesh)
-    // <TransformControls 
-    //   key={index}
-    //   ref={controlsRef}
-    //   mode="translate" // 仅允许移动，禁用旋转和缩放
-    //   showX={true}
-    //   showY={true}
-    //   showZ={true}
-    //   onMouseUp={handleDragEnd}
-    //   onMouseDown={handleDraggingChanged}
-    // >
     <group>
       <mesh
         ref={meshRef}
@@ -520,15 +461,6 @@ function FFDPoint({
 
 function FFDManager({ controlPoints, onPointDrag, selectedIndex, setSelectedIndex, setOrbitEnabled }) {
   
-  // const [controlPoints, setPoints] = useState(initialPoints);
-  
-  // 拖拽结束时更新点的位置
-  // const handleDrag = (index, newPosition) => {
-  //   const newPoints = [...controlPoints];
-  //   newPoints[index] = newPosition;
-  //   setPoints(newPoints);
-  // };
-  
   return (
     <>
       {/* 渲染所有点 */}
@@ -563,8 +495,9 @@ function FFDControl({
 }) {
   // 实时生成线段数据 (lines) - 依赖 controlPoints 的最新状态
   const lines = useMemo(() => {
-      // 重新执行生成线段的逻辑，但这次是基于 controlPoints
-      return generateFFDControlGeometry(gridSize, bboxMin, bboxMax, controlPoints).lines;
+      // TODO: 这里的逻辑需要修复，以使线条跟随变形的 controlPoints
+      // 目前，它只是生成了初始线条 
+      return generateFFDControlGeometry(gridSize, bboxMin, bboxMax).lines;
   }, [controlPoints, gridSize, bboxMin, bboxMax]);
 
   return (
@@ -599,11 +532,12 @@ function FFDControl({
   );
 }
 
+const bboxMin = [-20, -20, -20];
+const bboxMax = [20, 20, 20];
+
 function App() {
   // --- FFD 状态提升到 App 组件 ---
-  const gridSize = [3, 3, 3];
-  const bboxMin = [-20, -20, -20];
-  const bboxMax = [20, 20, 20];
+  const [gridSize, setGridSize] = useState([3, 3, 3]); // [ns, nt, nu]
 
   // 1. 初始化 controlPoints 状态
   const { points: initialPoints } = useMemo(
@@ -615,11 +549,12 @@ function App() {
   const [orbitEnabled, setOrbitEnabled] = useState(true); // 声明状态
   const [selectedIndex, setSelectedIndex] = useState(-1);
 
-  // 2. 这是在 Canvas“背景”上点击时触发的函数
-  // const handleCanvasClick = (e) => {
-  //   // 调用此函数意味着点击没有命中任何 FFDPoint
-  //   setSelectedIndex(-1); 
-  // };
+  // NEW: 添加一个 effect，当 gridSize 改变 (导致 initialPoints 改变) 时
+  // 自动重置 controlPoints
+  useEffect(() => {
+    setControlPoints(initialPoints);
+    setSelectedIndex(-1); // 并取消选中
+  }, [initialPoints]);
 
   // 2. 定义更新 controlPoints 的函数
   const handlePointDrag = (index, newPosition) => {
@@ -634,8 +569,80 @@ function App() {
     });
   };
 
+  // NEW: 重置按钮的点击处理函数
+  const handleReset = () => {
+    setControlPoints(initialPoints); // 恢复到当前 gridSize 的初始点
+    setSelectedIndex(-1); // 取消选中
+  };
+
+  // NEW: 晶格点数变化的点击处理函数
+  const handleGridChange = (axis, value) => {
+    const newSize = [...gridSize];
+    // FFD 每条轴至少需要 2 个点
+    const newCount = Math.max(2, parseInt(value, 10) || 2); 
+    
+    if (axis === 'x') newSize[0] = newCount;
+    if (axis === 'y') newSize[1] = newCount;
+    if (axis === 'z') newSize[2] = newCount;
+    
+    setGridSize(newSize);
+  };
+
   return (
     <div id="main-container" style={{ display: 'flex', height: '100vh', width: '100vw' }}>
+      
+      {/* NEW: 为右侧面板添加一些 CSS 样式 */}
+      <style>{`
+        #right-controls-container {
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+          color: #333;
+        }
+        .control-group {
+          margin-bottom: 20px;
+          padding-bottom: 15px;
+          border-bottom: 1px solid #ddd;
+        }
+        .control-group h3 {
+          margin-top: 0;
+          margin-bottom: 10px;
+          font-size: 16px;
+          color: #333;
+          font-weight: 600;
+        }
+        .control-row {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 8px;
+        }
+        .control-row label {
+          font-size: 14px;
+          color: #555;
+        }
+        .control-row input[type="number"] {
+          width: 60px;
+          padding: 4px 8px;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+          box-sizing: border-box; /* 确保 padding 不影响宽度 */
+        }
+        .reset-button {
+          width: 100%;
+          padding: 10px;
+          background-color: #007bff;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          font-size: 15px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: background-color 0.2s;
+        }
+        .reset-button:hover {
+          background-color: #0056b3;
+        }
+      `}</style>
+
       <div id="left-scene-container" style={{ flex: 7, backgroundColor: '#222' }}>
         <Canvas camera={{ position: [30, 30, 30], fov: 75 }} >
           <OrbitControls enabled={orbitEnabled} />
@@ -662,7 +669,52 @@ function App() {
           />
         </Canvas>
       </div>
-      <div id="right-controls-container" style={{ flex: 3, padding: '15px', overflowY: 'auto', backgroundColor: '#f0f0f0' }}>
+      
+      {/* --- 右侧控制面板 --- */}
+      <div id="right-controls-container" style={{ flex: 3, padding: '20px', overflowY: 'auto', backgroundColor: '#f4f4f4', boxSizing: 'border-box' }}>
+        
+        {/* NEW: 晶格控制 */}
+        <div className="control-group">
+          <h3>FFD Lattice Controls</h3>
+          <div className="control-row">
+            <label htmlFor="x-points">X Points (s)</label>
+            <input 
+              id="x-points"
+              type="number" 
+              min="2" // FFD 每轴至少需要2个点
+              value={gridSize[0]}
+              onChange={(e) => handleGridChange('x', e.target.value)}
+            />
+          </div>
+          <div className="control-row">
+            <label htmlFor="y-points">Y Points (t)</label>
+            <input 
+              id="y-points"
+              type="number" 
+              min="2"
+              value={gridSize[1]}
+              onChange={(e) => handleGridChange('y', e.target.value)}
+            />
+          </div>
+          <div className="control-row">
+            <label htmlFor="z-points">Z Points (u)</label>
+            <input 
+              id="z-points"
+              type="number" 
+              min="2"
+              value={gridSize[2]}
+              onChange={(e) => handleGridChange('z', e.target.value)}
+            />
+          </div>
+        </div>
+
+        {/* NEW: 重置按钮 */}
+        <div className="control-group">
+          <h3>Actions</h3>
+          <button className="reset-button" onClick={handleReset}>
+            Reset Deformation
+          </button>
+        </div>
 
       </div>
     </div>
