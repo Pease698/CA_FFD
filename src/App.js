@@ -13,61 +13,280 @@ import { Segments, Segment } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
 import { TransformControls } from '@react-three/drei';
 
-function Model({ url, controlPoints }) {
-  // 加载模型数据
-  const { scene } = useGLTF(url);
+// 计算二项式系数
+function binomial(n, k) {
+  if (k < 0 || k > n) return 0; // 无效输入
+  if (k == 0 || k == n) return 1;
+  if (k > n / 2) k = n - k;
+  let res = 1;
+  for (let i = 1; i <= k; ++i) {
+    res = res * (n - i + 1) / i;
+  }
+  return res;
+}
 
-  // 核心变形逻辑：使用 useMemo 确保只有 controlPoints 变化时才重新计算顶点
-  useMemo(() => {
-    
-    // ----------------------------------------------------
-    // FFD 变形主逻辑发生在这里！
-    // ----------------------------------------------------
-    
-    // 1. 遍历 GLTF 场景中的所有 Mesh
-    scene.traverse((object) => {
-      if (object.isMesh) {
-        const geometry = object.geometry;
+// bernstein 函数, n 为最高次数, i 为当前次数，t 为参数
+function bernstein(i, n, t) {
+  return binomial(n, i) * Math.pow(t, i) * Math.pow(1 - t, n - i);
+}
+
+function vectorDot(v1, v2) {
+  return v1[0] * v2[0] + v1[1] * v2[1] + v1[2] * v2[2];
+}
+
+function vectorCross(v1, v2) {
+  const resX = v1[1] * v2[2] - v1[2] * v2[1];
+  const resY = v1[2] * v2[0] - v1[0] * v2[2];
+  const resZ = v1[0] * v2[1] - v1[1] * v2[0];
+  return [resX, resY, resZ];
+}
+
+/**
+ * 1. 计算顶点在 FFD 晶格中的 (s, t, u) 参数坐标
+ * @param {THREE.Vector3} originalPos - 原始顶点坐标
+ * @param {Array<number>} bboxMin - FFD 晶格包围盒最小值 [x, y, z]
+ * @param {Array<number>} bboxMax - FFD 晶格包围盒最大值 [x, y, z]
+ * @returns {Array<number>} - [s, t, u] 坐标，已钳制在 [0, 1] 范围
+ */
+function calculateSTU(originalPos, bboxMin, bboxMax) {
+  const divisorX = bboxMax[0] - bboxMin[0];
+  const divisorY = bboxMax[1] - bboxMin[1];
+  const divisorZ = bboxMax[2] - bboxMin[2];
+
+  // 计算 s, t, u (参数坐标)
+  // 通过 (value - min) / (max - min) 计算比例
+  // 并处理分母为 0 的情况，以避免除以零
+  const s = (divisorX === 0) ? 0 : (originalPos.x - bboxMin[0]) / divisorX;
+  const t = (divisorY === 0) ? 0 : (originalPos.y - bboxMin[1]) / divisorY;
+  const u = (divisorZ === 0) ? 0 : (originalPos.z - bboxMin[2]) / divisorZ;
+
+  // 将 s, t, u 钳制在 [0, 1] 范围内
+  // 这确保了即使顶点在 FFD 晶格外部，也能被正确“拉伸”
+  return [
+    Math.max(0, Math.min(1, s)),
+    Math.max(0, Math.min(1, t)),
+    Math.max(0, Math.min(1, u))
+  ];
+}
+
+/**
+ * 2. 根据 (s, t, u) 和控制点计算变形后的位置
+ * @param {Array<Array<number>>} controlPoints - 控制点数组 (27 个 [x, y, z])
+ * @param {number} s - 参数 s
+ * @param {number} t - 参数 t
+ * @param {number} u - 参数 u
+ * @param {Array<number>} gridSize - 晶格维度 [ns, nt, nu] (例如 [3, 3, 3])
+ * @returns {Array<number>} - 变形后的 [x, y, z]
+ */
+function calculateDeformedPosition(controlPoints, s, t, u, gridSize) {
+  const [ns, nt, nu] = gridSize;
+  const l = ns - 1; // s 方向的阶数
+  const m = nt - 1; // t 方向的阶数
+  const n = nu - 1; // u 方向的阶数
+
+  const deformedPos = [0, 0, 0];
+
+  for (let i = 0; i < ns; i++) {
+    const bernsteinS = bernstein(i, l, s);
+    for (let j = 0; j < nt; j++) {
+      const bernsteinT = bernstein(j, m, t);
+      for (let k = 0; k < nu; k++) {
+        const bernsteinU = bernstein(k, n, u);
         
-        // 2. 访问 geometry 的顶点数据
-        const positionAttribute = geometry.attributes.position;
-        const vertexCount = positionAttribute.count;
+        // 根据 i, j, k 计算在 controlPoints 一维数组中的索引
+        const index = i * (nt * nu) + j * nu + k;
+        
+        if (index >= controlPoints.length) {
+          console.error("FFD index out of bounds");
+          continue;
+        }
+        
+        const cp = controlPoints[index]; // cp 是 [x, y, z]
+
+        // 累加控制点的加权贡献
+        const weight = bernsteinS * bernsteinT * bernsteinU;
+        deformedPos[0] += cp[0] * weight;
+        deformedPos[1] += cp[1] * weight;
+        deformedPos[2] += cp[2] * weight;
+      }
+    }
+  }
+  return deformedPos;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
+  // 1. 加载原始场景
+  const { scene: originalScene } = useGLTF(url);
+
+  // 2. 深度克隆原始场景，用于变形和渲染
+  // 这个 useMemo 仅在 originalScene 加载时运行一次
+  const deformedScene = useMemo(() => {
+    // console.log("Cloning scene...");
+    return originalScene.clone(true);
+  }, [originalScene]);
+
+
+  // 3. 提取并存储所有原始几何体的顶点数据
+  // (已修复 UUID 不匹配的 bug)
+  const originalGeometries = useMemo(() => {
+    // console.log("Extracting original geometry (Fixed)...");
+    const geoMap = new Map();
+
+    // 1. 将原始网格和克隆网格分别收集到数组中
+    // 我们依赖 .traverse() 对于
+    // 原始对象和克隆对象具有相同的遍历顺序
+    const originalMeshes = [];
+    originalScene.traverse((object) => {
+      if (object.isMesh) {
+        originalMeshes.push(object);
+      }
+    });
+
+    const deformedMeshes = [];
+    deformedScene.traverse((object) => {
+      if (object.isMesh) {
+        deformedMeshes.push(object);
+      }
+    });
+
+    
+
+    // 2. 检查数量是否匹配 (作为安全检查)
+    if (originalMeshes.length !== deformedMeshes.length) {
+      console.error("FFD: Cloned mesh count does not match original!");
+      return geoMap;
+    }
+
+    // 3. 遍历数组，使用 *克隆* 的 UUID 作为键，*原始* 的位置数据作为值
+    for (let i = 0; i < deformedMeshes.length; i++) {
+      const deformedMesh = deformedMeshes[i];
+      const originalMesh = originalMeshes[i];
+      
+      geoMap.set(deformedMesh.uuid, { // 键: 克隆体 (deformedMesh) 的 UUID
+        // 值: 原始体 (originalMesh) 的位置数据
+        originalPosition: originalMesh.geometry.attributes.position.clone()
+      });
+    }
+
+    return geoMap;
+  }, [originalScene, deformedScene]); // 依赖项现在还需要包括 deformedScene
+
+  // // 3. 提取并存储所有原始几何体的顶点数据
+  // // (已修复 UUID 不匹配的 bug) -> 替换为更健壮的基于名称的映射
+  // const originalGeometries = useMemo(() => {
+  //   console.log("Extracting original geometry (Name-based)...");
+  //   const geoMap = new Map();
+
+  //   // 1. 遍历 *原始* 场景，创建一个 "name" -> "originalMesh" 的索引
+  //   const originalMeshMap = new Map();
+  //   originalScene.traverse((object) => {
+  //     if (object.isMesh) {
+  //       // 如果名称已存在，可能会覆盖，但这是更健壮方法的基础
+  //       if (object.name) {
+  //         originalMeshMap.set(object.name, object);
+  //       }
+  //     }
+  //   });
+
+  //   // 2. 遍历 *变形后* 的场景
+  //   deformedScene.traverse((object) => {
+  //     if (object.isMesh) {
+  //       // 3. 使用变形后网格的 name，在索引中查找对应的 *原始* 网格
+  //       const originalMesh = originalMeshMap.get(object.name);
+  //       
+  //       if (originalMesh && originalMesh.geometry.attributes.position) {
+  //         // 4. 建立从 "deformedMesh.uuid" -> "originalMesh.geometry" 的映射
+  //         geoMap.set(object.uuid, { // 键: 克隆体 (deformedMesh) 的 UUID
+  //           // 值: 原始体 (originalMesh) 的位置数据
+  //           originalPosition: originalMesh.geometry.attributes.position.clone()
+  //         });
+  //       } else {
+  //         console.warn(`FFD: Could not find original mesh for: ${object.name}`);
+  //       }
+  //     }
+  //   });
+
+  //   return geoMap;
+  // }, [originalScene, deformedScene]); // 依赖项不变
+
+  // 4. 核心变形逻辑：当 controlPoints 变化时执行
+  // (也依赖其他 FFD 参数)
+  useMemo(() => {
+    // console.log("Deforming model...");
+    
+    // 创建一个可重用的 Vector3，避免在循环中创建成千上万个对象
+    const originalVertex = new THREE.Vector3();
+
+    // 遍历我们 *克隆* 出来的 deformedScene
+    deformedScene.traverse((object) => {
+      if (object.isMesh) {
+        // 找到这个 Mesh 对应的原始几何体数据
+        const originalData = originalGeometries.get(object.uuid);
+        
+        if (!originalData) {
+          // 如果在 Map 中没找到（例如，这个 mesh 是后来添加的），则跳过
+          return;
+        }
+
+        const { geometry: deformedGeometry, originalPosition: originalPositionAttribute } = originalData;
+        
+        // 获取当前（变形中）的几何体
+        const geometry = object.geometry; 
+        
+        // 获取我们要修改的顶点缓冲区
+        const deformedPositionAttribute = geometry.attributes.position;
+        const vertexCount = originalPositionAttribute.count;
 
         // 3. 对每个顶点应用 FFD 变形
         for (let i = 0; i < vertexCount; i++) {
-          const originalX = positionAttribute.getX(i);
-          const originalY = positionAttribute.getY(i);
-          const originalZ = positionAttribute.getZ(i);
-
-          // FFD 计算的步骤（伪代码）：
-          // 1. 计算原始顶点 (originalX, originalY, originalZ) 在 FFD 笼子中的参数坐标 (s, t, u)
-          // [s, t, u] = calculateSTU(originalX, originalY, originalZ, bboxMin, bboxMax, gridSize);
-
-          // 2. 使用最新的 controlPoints 和 (s, t, u) 进行三线性插值，计算新的变形位置 (newX, newY, newZ)
-          // [newX, newY, newZ] = calculateDeformedPosition(controlPoints, s, t, u, gridSize);
           
-          // 3. 更新顶点位置
-          // positionAttribute.setXYZ(i, newX, newY, newZ);
+          // A. 从 *原始* 缓冲区中获取顶点
+          originalVertex.fromBufferAttribute(originalPositionAttribute, i);
+
+          // B. FFD 计算步骤：
+          // 1. 计算原始顶点在 FFD 笼子中的参数坐标 (s, t, u)
+          const [s, t, u] = calculateSTU(originalVertex, bboxMin, bboxMax);
+
+          // 2. 使用最新的 controlPoints 和 (s, t, u) 计算新的变形位置 (newX, newY, newZ)
+          const [newX, newY, newZ] = calculateDeformedPosition(controlPoints, s, t, u, gridSize);
+          
+          // 3. 更新 *变形后* 的顶点位置
+          deformedPositionAttribute.setXYZ(i, newX, newY, newZ);
         }
 
         // 4. 标记几何体需要更新
-        positionAttribute.needsUpdate = true;
-        geometry.computeVertexNormals(); // 可能需要重新计算法线以保证光照正确
+        deformedPositionAttribute.needsUpdate = true;
+        geometry.computeVertexNormals(); // 重新计算法线以保证光照正确
       }
     });
     
-    // ----------------------------------------------------
-    
-  }, [controlPoints, scene]); // 依赖 controlPoints：每当拖拽停止，状态更新，这里就会重新执行
+  }, [controlPoints, deformedScene, originalGeometries, gridSize, bboxMin, bboxMax]); // 依赖项
 
   return (
-    <primitive object={scene} scale={1} />
+    <primitive object={deformedScene} scale={1} />
   );
 }
+
 function SceneContainer() { // main component of the 3D scene
   return (
     <Canvas camera={{ position: [30, 30, 30], fov: 75 }}>
-      // 引入模型
+      {/* 引入模型 */}
       <Model url="./book/scene.gltf" />
       {/* 引入控制组件 */}
       <OrbitControls enableZoom={true} enablePan={true} />
@@ -158,14 +377,22 @@ function FFDPoint({
   // 处理拖拽开始和结束的逻辑
   const handleDragEnd = () => {
     // 拖拽结束时，获取当前 Mesh 的位置
-    const newPosition = meshRef.current.position;
-    onDrag(index, [newPosition.x, newPosition.y, newPosition.z]);
+    // const newPosition = meshRef.current.position;
+    // onDrag(index, [newPosition.x, newPosition.y, newPosition.z]);
     setOrbitEnabled(true);
   };
   
-  const handleDraggingChanged = () => {
+  const handleDragStart = () => {
     setOrbitEnabled(false);
   };
+
+  const handleDarg = (e) => {
+    // e.target.object 就是被控制的 meshRef.current
+    if (e.target.object) {
+      const newPosition = e.target.object.position;
+      onDrag(index, [newPosition.x, newPosition.y, newPosition.z]);
+    }
+  }
 
   return (
     // // TransformControls 必须包裹一个 THREE.Object3D (如 Mesh)
@@ -208,7 +435,8 @@ function FFDPoint({
           showZ={true}
           object={meshRef} // 关键：将 controls 附加到 meshRef 上
           onMouseUp={handleDragEnd}
-          onMouseDown={handleDraggingChanged}
+          onMouseDown={handleDragStart}
+          onChange={handleDarg}
         />
       )}
     </group>
@@ -340,7 +568,13 @@ function App() {
           <pointLight position={[10, 10, 10]} />
 
           {/* 传递 controlPoints 状态给 Model 组件 */}
-          <Model url="./book/scene.gltf" controlPoints={controlPoints} />
+          <Model 
+            url="./book/scene.gltf" 
+            controlPoints={controlPoints}
+            gridSize={gridSize}
+            bboxMin={bboxMin}
+            bboxMax={bboxMax}
+          />
 
           {/* 绘制 FFD 控制顶点和网格线 */}
           <FFDManager 
