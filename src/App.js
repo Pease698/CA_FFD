@@ -3,14 +3,10 @@ import './App.css';
 
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
-import { useGLTF } from '@react-three/drei';
-import { Scene } from 'three';
-import React, { useRef, useMemo, useState, createRef, useCallback } from 'react';
-import { useFrame } from '@react-three/fiber';
-import { Points, PointMaterial, Line} from '@react-three/drei';
-import * as THREE from 'three';
-import { Segments, Segment } from '@react-three/drei';
+import React, { useRef, useMemo, useState, useCallback } from 'react';
 import { useThree } from '@react-three/fiber';
+import { useFrame } from '@react-three/fiber';
+import * as THREE from 'three';
 import { TransformControls } from '@react-three/drei';
 import { useLayoutEffect, useEffect } from 'react';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
@@ -143,9 +139,9 @@ function Model({ name, controlPoints, gridSize, bboxMin, bboxMax, onBboxUpdate }
       bboxMin: bboxMin,
       bboxMax: bboxMax,
       onBboxUpdate: onBboxUpdate,
-      scale: 0.3
+      scale: 0.3  // 缩小模型
     })
-  } else {
+  } else {        // 导入其他几何模型
     return <PrimitiveModel
       name={name}
       controlPoints={controlPoints}
@@ -161,7 +157,7 @@ const loader = new GLTFLoader();
 
 function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUpdate, scale = 1.0 }) {
   // 1. 用 State 替换 useGLTF
-  //    我们需要一个 state 来存储异步加载的原始场景
+  //    需要一个 state 来存储异步加载的原始场景
   const [originalScene, setOriginalScene] = useState(null);
 
   // 2. 使用 useEffect 来触发命令式加载
@@ -177,7 +173,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
     // 这模拟了 `loadModel` 中的 `scene.remove(objectScene)` 逻辑
     setOriginalScene(null);
 
-    // --- 这就是 `loadModel` 的核心逻辑 ---
+    // `loadModel` 的核心逻辑
     loader.load(
       url,
       // 成功回调 (m) -> (gltf)
@@ -186,9 +182,9 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
         // 这将触发 useMemo 链的重新计算
         setOriginalScene(gltf.scene);
       },
-      // (可选) onProgress 回调
+      // onProgress 回调
       undefined,
-      // (可选) onError 回调
+      // onError 回调
       (error) => {
         console.error(`加载模型 ${url} 时出错:`, error);
         setOriginalScene(null); // 出错时也确保清理
@@ -197,17 +193,16 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
     
   }, [url]); // 仅在 `url` 变化时重新运行此 effect
 
-  // 2. 深度克隆原始场景，用于变形和渲染
+  // 3. 深度克隆原始场景，用于变形和渲染
   const bakedScene = useMemo(() => {
     if(!originalScene) return null;
 
     const scene = originalScene.clone(true); // 克隆
     const objectsToConvert = [];
 
-    // --- NEW: 在烘焙前应用缩放 ---
+    // 在烘焙前应用缩放
     // 将 scale 应用于克隆场景的根部
     scene.scale.set(scale, scale, scale);
-    // --------------------------------
 
     // 1. 找到所有 InstancedMesh
     scene.traverse((object) => {
@@ -235,7 +230,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
 
         const newMesh = new THREE.Mesh(
           instancedMesh.geometry.clone(), // 克隆几何体
-          instancedMesh.material         // 共享材质
+          instancedMesh.material          // 共享材质
         );
 
         // 应用组合后的完整烘焙矩阵
@@ -255,7 +250,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
     return scene;
   }, [originalScene]);
 
-  // 3. 创建 "变形" 场景 (可写目标)
+  // 4. 创建 "变形" 场景 (可写目标)
   // 这是我们将要实际修改并渲染的场景
   const deformedScene = useMemo(() => {
     // console.log("Step 3: Cloning baked scene AND its geometries...");
@@ -266,11 +261,10 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
 
     // 遍历新克隆的 scene，
     // 并将每个网格的几何体(geometry)替换为它自己的克隆版本。
-    // 这打破了 deformedScene 和 bakedScene 之间的共享引用。
+    // 打破 deformedScene 和 bakedScene 之间的共享引用。
     scene.traverse((object) => {
       if (object.isMesh) {
-        // object.geometry.clone() 会创建一个新的、
-        // 拥有独立 buffer attributes 的几何体。
+        // 创建一个新的、拥有独立 buffer attributes 的几何体。
         object.geometry = object.geometry.clone();
       }
     });
@@ -278,8 +272,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
     return scene;
   }, [bakedScene]);
 
-  // MODIFIED: 恢复 3.5 和 3.6
-  // 3.5. 计算模型的精确包围盒 (依赖 bakedScene)
+  // 5. 计算模型的精确包围盒 (依赖 bakedScene)
   const modelBbox = useMemo(() => {
     // MODIFIED: 依赖 bakedScene
     if (!bakedScene) return null; 
@@ -287,7 +280,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
     bakedScene.updateMatrixWorld(true);
     const box = new THREE.Box3();
     
-    // MODIFIED: 从 bakedScene 计算
+    // 从 bakedScene 计算
     bakedScene.traverse((object) => { 
       if (object.isMesh) {
         box.expandByObject(object);
@@ -298,9 +291,9 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
       return null;
     }
     return box;
-  }, [bakedScene]); // <-- 关键依赖
+  }, [bakedScene]);
 
-  // 3.6. 当 modelBbox 计算出来后，通过回调通知父组件
+  // 6. 当 modelBbox 计算出来后，通过回调通知父组件
   useEffect(() => {
     // 当 bakedScene 变为 null 时, modelBbox 也会变为 null
     // 当 bakedScene 加载完成时, modelBbox 会变为 Box3
@@ -308,25 +301,24 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
     if (onBboxUpdate) {
       onBboxUpdate(modelBbox);
     }
-  }, [modelBbox, onBboxUpdate]); // <-- 关键依赖
+  }, [modelBbox, onBboxUpdate]);
 
-  // 4. 预计算 STU 坐标
+  // 7. 预计算 STU 坐标
   const geometryData = useMemo(() => {
     // console.log("Step 4: Pre-calculating STU (Array)...");
     if (!bakedScene || !bboxMin || !bboxMax) return []; 
 
-    // --- 强制更新场景中所有对象的世界矩阵 ---
-    // 这样我们才能读取到 object.matrixWorld
+    // 强制更新场景中所有对象的世界矩阵
     bakedScene.updateMatrixWorld(true);
     
-    // 我们将 STU 数据存储在一个数组中，
+    // 将 STU 数据存储在一个数组中
     // 依赖于 bakedScene 和 deformedScene 具有完全相同的遍历顺序
     const stuList = [];
     const originalVertex = new THREE.Vector3();
 
     bakedScene.traverse((object) => {
       if (object.isMesh) {
-        // --- 获取此特定网格的世界变换矩阵 ---
+        // 获取此特定网格的世界变换矩阵
         const worldMatrix = object.matrixWorld;
 
         // 从 "bakedMesh" (只读源) 读取位置数据
@@ -337,7 +329,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
         for (let j = 0; j < vertexCount; j++) {
           originalVertex.fromBufferAttribute(positionAttribute, j);
 
-          // --- 将局部坐标转换（应用）为世界坐标 ---
+          // 将局部坐标转换（应用）为世界坐标
           originalVertex.applyMatrix4(worldMatrix);
 
           const [s, t, u] = calculateSTU(originalVertex, bboxMin, bboxMax);
@@ -354,7 +346,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
     
   }, [bakedScene, bboxMin, bboxMax]);
 
-  // 5. 核心变形逻辑
+  // 8. 核心变形逻辑
   React.useLayoutEffect(() => {
     // console.log("Step 5: Applying deformation (Array)...");
     // 增加防护条件，因为 deformedScene 和 geometryData 现在可能是 null/[]
@@ -363,7 +355,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
     }
     
     const stu = new THREE.Vector3();
-    let meshIndex = 0; // <--- 用于跟踪 STU 数组的索引
+    let meshIndex = 0; // 用于跟踪 STU 数组的索引
 
     // 遍历 "deformedScene" (可写目标)
     deformedScene.traverse((object) => {
@@ -397,7 +389,7 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
         deformedPositionAttribute.needsUpdate = true;
         geometry.computeVertexNormals(); 
         
-        meshIndex++; // <--- 移动到下一个网格的 STU 数据
+        meshIndex++; // 移动到下一个网格的 STU 数据
       }
     });
     
@@ -419,7 +411,6 @@ function PrimitiveModel({
 }) {
   
   // 1. 创建 "baked" (原始) 网格
-  //    我们使用 useMemo 来确保仅在 name 更改时才重新创建几何体
   const bakedMesh = useMemo(() => {
     // 为所有几何体创建一个共享材质
     const material = new THREE.MeshPhysicalMaterial({
@@ -427,8 +418,8 @@ function PrimitiveModel({
       metalness: 0.5,
       roughness: 0.6,
 
-      emissive: 0x2194ce,         // 让它自己发出和颜色一样的光
-      emissiveIntensity: 0.5     // "发光"的强度
+      emissive: 0x2194ce,         // 发出和颜色一样的光
+      emissiveIntensity: 0.5      // "发光"强度
     });
     
     let geometry = null;
@@ -451,13 +442,11 @@ function PrimitiveModel({
   }, [name]); // 仅当 'name' prop 改变时重新运行
 
   // 2. 创建 "deformed" (变形) 网格
-  //    这是我们将实际修改并渲染的对象
   const deformedMesh = useMemo(() => {
     if (!bakedMesh) return null;
     
-    // 克隆网格...
+    // 克隆网格并深度克隆其几何体，使其具有独立的顶点
     const mesh = bakedMesh.clone();
-    // ...并*深度克隆*其几何体，使其具有独立的顶点
     mesh.geometry = bakedMesh.geometry.clone();
     
     return mesh;
@@ -467,7 +456,7 @@ function PrimitiveModel({
   const modelBbox = useMemo(() => {
     if (!bakedMesh) return null;
     
-    // 基本几何体默认在原点，我们可以直接计算包围盒
+    // 基本几何体默认在原点，可以直接计算包围盒
     bakedMesh.geometry.computeBoundingBox();
     return bakedMesh.geometry.boundingBox;
     
@@ -479,7 +468,6 @@ function PrimitiveModel({
       onBboxUpdate(modelBbox);
     }
     
-    // [重要] 添加一个清理函数：
     // 当此组件被卸载（例如切换模型）时,
     // 它会通知 App 将 BBox 重置为 null。
     return () => {
@@ -504,7 +492,6 @@ function PrimitiveModel({
     for (let j = 0; j < vertexCount; j++) {
       originalVertex.fromBufferAttribute(positionAttribute, j);
 
-      // 注意：与 Modelloading 不同, 
       // 基本几何体在局部空间中, 无需应用 worldMatrix
       const [s, t, u] = calculateSTU(originalVertex, bboxMin, bboxMax);
       stuArray[j * 3 + 0] = s;
@@ -550,18 +537,15 @@ function PrimitiveModel({
   return deformedMesh ? <primitive object={deformedMesh} /> : null;
 }
 
-// 假设我们有一个生成 FFD 控制点和线的函数
+// 生成 FFD 控制点和线
 function generateFFDControlGeometry(
-  gridSize = [3, 3, 3], // 例如 [3,3,3] 代表一个立方体
+  gridSize = [3, 3, 3],
   bboxMin = [-1, -1, -1],
   bboxMax = [1, 1, 1]
 ) {
-  // --- 这是修复问题的关键 ---
-  // 这个检查现在至关重要
   if (!bboxMin || !bboxMax) {
     return { points: [], lines: [] }; // 如果 bbox 未定义, 返回空
   }
-  // ------------------------------
 
   const [ns, nt, nu] = gridSize;
   const points = [];
@@ -652,7 +636,7 @@ function FFDPoint({
         ref={meshRef}
         position={initialPosition}
         onClick={(e) => {
-          e.stopPropagation(); // 阻止事件冒泡（非常重要！）
+          e.stopPropagation(); // 阻止事件冒泡
           onSelect(index);
         }}
       >
@@ -706,57 +690,6 @@ function FFDManager({ controlPoints, onPointDrag, selectedIndex, setSelectedInde
   );
 }
 
-function FFDControl({
-  gridSize = [3, 3, 3],
-  bboxMin = [-1, -1, -1],
-  bboxMax = [1, 1, 1],
-  pointColor = 'white',
-  lineColor = 'grey',
-  pointSize = 0.3,
-  lineWidth = 2,
-  controlPoints,
-  onPointDrag,
-  setOrbitEnabled,
-}) {
-  // 实时生成线段数据 (lines) - 依赖 controlPoints 的最新状态
-  const lines = useMemo(() => {
-      // TODO: 这里的逻辑需要修复，以使线条跟随变形的 controlPoints
-      // 目前，它只是生成了初始线条 
-      return generateFFDControlGeometry(gridSize, bboxMin, bboxMax).lines;
-  }, [controlPoints, gridSize, bboxMin, bboxMax]);
-
-  return (
-    <group>
-      {/* 绘制控制顶点 */}
-      {controlPoints.map((pos, index) => (
-        <FFDPoint
-          key={index}
-          index={index}
-          initialPosition={pos}
-          onDrag={onPointDrag}
-          setOrbitEnabled={setOrbitEnabled}
-        />
-      ))}
-
-      {/* 绘制网格线 */}
-      <Segments 
-        limit={1000} // 预分配最大线段数，确保足够 (FFD笼子一般不会超过这个数)
-        color={lineColor}
-        lineWidth={lineWidth}
-      >
-        {/* 遍历数据并为每个线段渲染一个 Segment 组件 */}
-        {lines.map((segment, index) => (
-          <Segment
-            key={index}
-            start={segment[0]}
-            end={segment[1]}
-          />
-        ))}
-      </Segments>
-    </group>
-  );
-}
-
 /**
  * 一个跟随相机移动的点光源
  */
@@ -778,14 +711,12 @@ function CameraLight() {
   });
 
   // 5. 返回一个点光源。
-  //    - 我们将它附加到 ref 上，以便在 useFrame 中访问它
-  //    - 'distance' 属性很重要，它决定了光能照多远
-  //    - 'intensity' 是光的强度
+  //    - 附加到 ref 上，以便在 useFrame 中访问它
   return (
     <pointLight 
       ref={lightRef} 
-      intensity={1000}  // 强度调高一些，作为"头灯"
-      distance={50}   // 确保光能照到你的模型 (你的相机在 30 远)
+      intensity={1000}
+      distance={50}
       color={0xffffff} // 默认是白光
     />
   );
@@ -795,10 +726,8 @@ const DEFAULT_BBOXMIN = [-20, -20, -20];
 const DEFAULT_BBOXMAX = [20, 20, 20];
 
 function App() {
-  // --- FFD 状态提升到 App 组件 ---
   const [gridSize, setGridSize] = useState([3, 3, 3]); // [ns, nt, nu]
   const [modelName, setModelName] = useState('car');
-  // NEW: 将 bboxMin 和 bboxMax 提升为 state
   const [bboxMin, setBboxMin] = useState(DEFAULT_BBOXMIN);
   const [bboxMax, setBboxMax] = useState(DEFAULT_BBOXMAX);
 
@@ -812,8 +741,7 @@ function App() {
   const [orbitEnabled, setOrbitEnabled] = useState(true); // 声明状态
   const [selectedIndex, setSelectedIndex] = useState(-1);
 
-  // NEW: 添加一个 effect，当 gridSize 改变 (导致 initialPoints 改变) 时
-  // 自动重置 controlPoints
+  // 当 gridSize 改变 (导致 initialPoints 改变) 时，自动重置 controlPoints
   useEffect(() => {
     setControlPoints(initialPoints);
     setSelectedIndex(-1); // 并取消选中
@@ -824,21 +752,17 @@ function App() {
     setControlPoints(prevPoints => {
       const newPoints = [...prevPoints];
       newPoints[index] = newPosition;
-      
-      // ⚠️ 这一步是 FFD 的核心：在这里触发模型的变形计算
-      // 也可以直接返回 newPoints，让 Model 组件在接收到新 props 后自行计算
-      
       return newPoints;
     });
   };
 
-  // NEW: 重置按钮的点击处理函数
+  // 重置按钮的点击处理函数
   const handleReset = () => {
     setControlPoints(initialPoints); // 恢复到当前 gridSize 的初始点
     setSelectedIndex(-1); // 取消选中
   };
 
-  // NEW: 晶格点数变化的点击处理函数
+  // 晶格点数变化的点击处理函数
   const handleGridChange = (axis, value) => {
     const newSize = [...gridSize];
     // FFD 每条轴至少需要 2 个点
@@ -876,12 +800,12 @@ function App() {
       setBboxMin(null);
       setBboxMax(null);
     }
-  }, []); // <-- 空依赖数组确保函数引用稳定
+  }, []); // 空依赖数组确保函数引用稳定
 
   return (
     <div id="main-container" style={{ display: 'flex', height: '100vh', width: '100vw' }}>
       
-      {/* NEW: 为右侧面板添加一些 CSS 样式 */}
+      {/* 为右侧面板添加一些 CSS 样式 */}
       <style>{`
         #right-controls-container {
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -986,7 +910,7 @@ function App() {
       {/* --- 右侧控制面板 --- */}
       <div id="right-controls-container" style={{ flex: 3, padding: '20px', overflowY: 'auto', backgroundColor: '#f4f4f4', boxSizing: 'border-box' }}>
         
-        {/* --- (第 2 处修改) 将按钮组替换为下拉框 --- */}
+        {/* 下拉框 */}
         <div className="control-group">
           <h3>Load Model</h3>
           <label htmlFor="model-select" className="model-label">
@@ -1007,7 +931,7 @@ function App() {
           </select>
         </div>
 
-        {/* NEW: 晶格控制 */}
+        {/* 晶格控制 */}
         <div className="control-group">
           <h3>FFD Lattice Controls</h3>
           <div className="control-row">
@@ -1016,6 +940,7 @@ function App() {
               id="x-points"
               type="number" 
               min="2" // FFD 每轴至少需要2个点
+              max="11"
               value={gridSize[0]}
               onChange={(e) => handleGridChange('x', e.target.value)}
             />
@@ -1026,6 +951,7 @@ function App() {
               id="y-points"
               type="number" 
               min="2"
+              max="11"
               value={gridSize[1]}
               onChange={(e) => handleGridChange('y', e.target.value)}
             />
@@ -1036,13 +962,14 @@ function App() {
               id="z-points"
               type="number" 
               min="2"
+              max="11"
               value={gridSize[2]}
               onChange={(e) => handleGridChange('z', e.target.value)}
             />
           </div>
         </div>
 
-        {/* NEW: 重置按钮 */}
+        {/* 重置按钮 */}
         <div className="control-group">
           <h3>Actions</h3>
           <button className="reset-button" onClick={handleReset}>
