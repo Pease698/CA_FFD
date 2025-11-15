@@ -5,7 +5,7 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import { useGLTF } from '@react-three/drei';
 import { Scene } from 'three';
-import React, { useRef, useMemo, useState, createRef} from 'react';
+import React, { useRef, useMemo, useState, createRef, useCallback } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Points, PointMaterial, Line} from '@react-three/drei';
 import * as THREE from 'three';
@@ -116,12 +116,33 @@ function calculateDeformedPosition(controlPoints, s, t, u, gridSize) {
   return deformedPos;
 }
 
+function Model({ name, controlPoints, gridSize, bboxMin, bboxMax, onBboxUpdate }) {
+  if (name === 'book') {
+    return Modelloading({
+      url: './book/scene.gltf',
+      controlPoints: controlPoints,
+      gridSize: gridSize,
+      bboxMin: bboxMin,
+      bboxMax: bboxMax,
+      onBboxUpdate: onBboxUpdate,
+      scale: 1.0
+    })
+  } else if (name === 'car') {
+    return Modelloading({
+      url: './car/scene.gltf',
+      controlPoints: controlPoints,
+      gridSize: gridSize,
+      bboxMin: bboxMin,
+      bboxMax: bboxMax,
+      onBboxUpdate: onBboxUpdate,
+      scale: 0.3
+    })
+  }
+}
+
 const loader = new GLTFLoader();
 
-function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
-  // // 1. 加载原始场景
-  // const { scene: originalScene } = useGLTF(url);
-
+function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUpdate, scale = 1.0 }) {
   // 1. 用 State 替换 useGLTF
   //    我们需要一个 state 来存储异步加载的原始场景
   const [originalScene, setOriginalScene] = useState(null);
@@ -165,6 +186,11 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
 
     const scene = originalScene.clone(true); // 克隆
     const objectsToConvert = [];
+
+    // --- NEW: 在烘焙前应用缩放 ---
+    // 将 scale 应用于克隆场景的根部
+    scene.scale.set(scale, scale, scale);
+    // --------------------------------
 
     // 1. 找到所有 InstancedMesh
     scene.traverse((object) => {
@@ -235,11 +261,42 @@ function Model({ url, controlPoints, gridSize, bboxMin, bboxMax }) {
     return scene;
   }, [bakedScene]);
 
+  // MODIFIED: 恢复 3.5 和 3.6
+  // 3.5. 计算模型的精确包围盒 (依赖 bakedScene)
+  const modelBbox = useMemo(() => {
+    // MODIFIED: 依赖 bakedScene
+    if (!bakedScene) return null; 
+    
+    bakedScene.updateMatrixWorld(true);
+    const box = new THREE.Box3();
+    
+    // MODIFIED: 从 bakedScene 计算
+    bakedScene.traverse((object) => { 
+      if (object.isMesh) {
+        box.expandByObject(object);
+      }
+    });
+    
+    if (box.isEmpty()) {
+      return null;
+    }
+    return box;
+  }, [bakedScene]); // <-- 关键依赖
+
+  // 3.6. 当 modelBbox 计算出来后，通过回调通知父组件
+  useEffect(() => {
+    // 当 bakedScene 变为 null 时, modelBbox 也会变为 null
+    // 当 bakedScene 加载完成时, modelBbox 会变为 Box3
+    // onBboxUpdate 是 App 的 useCallback 版本，引用稳定
+    if (onBboxUpdate) {
+      onBboxUpdate(modelBbox);
+    }
+  }, [modelBbox, onBboxUpdate]); // <-- 关键依赖
 
   // 4. 预计算 STU 坐标
   const geometryData = useMemo(() => {
     // console.log("Step 4: Pre-calculating STU (Array)...");
-    if (!bakedScene) return []; // 如果没有烘焙场景，返回空数组
+    if (!bakedScene || !bboxMin || !bboxMax) return []; 
 
     // --- 强制更新场景中所有对象的世界矩阵 ---
     // 这样我们才能读取到 object.matrixWorld
@@ -338,6 +395,13 @@ function generateFFDControlGeometry(
   bboxMin = [-1, -1, -1],
   bboxMax = [1, 1, 1]
 ) {
+  // --- 这是修复问题的关键 ---
+  // 这个检查现在至关重要
+  if (!bboxMin || !bboxMax) {
+    return { points: [], lines: [] }; // 如果 bbox 未定义, 返回空
+  }
+  // ------------------------------
+
   const [ns, nt, nu] = gridSize;
   const points = [];
   const lines = [];
@@ -532,12 +596,15 @@ function FFDControl({
   );
 }
 
-const bboxMin = [-20, -20, -20];
-const bboxMax = [20, 20, 20];
+const DEFAULT_BBOXMIN = [-20, -20, -20];
+const DEFAULT_BBOXMAX = [20, 20, 20];
 
 function App() {
   // --- FFD 状态提升到 App 组件 ---
   const [gridSize, setGridSize] = useState([3, 3, 3]); // [ns, nt, nu]
+  // NEW: 将 bboxMin 和 bboxMax 提升为 state
+  const [bboxMin, setBboxMin] = useState(DEFAULT_BBOXMIN);
+  const [bboxMax, setBboxMax] = useState(DEFAULT_BBOXMAX);
 
   // 1. 初始化 controlPoints 状态
   const { points: initialPoints } = useMemo(
@@ -587,6 +654,33 @@ function App() {
     
     setGridSize(newSize);
   };
+
+  const handleBboxUpdate = useCallback((newBbox) => {
+    // 检查 newBbox 是否有效
+    if (newBbox) {
+      
+      const size = newBbox.getSize(new THREE.Vector3());
+      // 使用 5% 的 B-Box 对角线长度作为 padding
+      // 同时设置一个最小 padding (如 0.1) 避免 B-Box 大小为 0
+      const padding = Math.max(size.length() * 0.05, 0.1); 
+
+      setBboxMin([
+        newBbox.min.x - padding, 
+        newBbox.min.y - padding, 
+        newBbox.min.z - padding
+      ]);
+      setBboxMax([
+        newBbox.max.x + padding, 
+        newBbox.max.y + padding, 
+        newBbox.max.z + padding
+      ]);
+    } else {
+      // 如果模型被卸载 (newBbox 为 null) 或 B-Box 无效
+      // 将状态重置回 null
+      setBboxMin(null);
+      setBboxMax(null);
+    }
+  }, []); // <-- 空依赖数组确保函数引用稳定
 
   return (
     <div id="main-container" style={{ display: 'flex', height: '100vh', width: '100vw' }}>
@@ -650,12 +744,13 @@ function App() {
           <pointLight position={[10, 10, 10]} />
 
           {/* 传递 controlPoints 状态给 Model 组件 */}
-          <Model 
-            url="./book/scene.gltf" 
+          <Model
+            name='car'
             controlPoints={controlPoints}
             gridSize={gridSize}
             bboxMin={bboxMin}
             bboxMax={bboxMax}
+            onBboxUpdate={handleBboxUpdate}
           />
 
           {/* 绘制 FFD 控制顶点和网格线 */}
