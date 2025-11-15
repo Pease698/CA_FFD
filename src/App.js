@@ -117,6 +117,14 @@ function calculateDeformedPosition(controlPoints, s, t, u, gridSize) {
 }
 
 function Model({ name, controlPoints, gridSize, bboxMin, bboxMax, onBboxUpdate }) {
+  const ffdProps = {
+    controlPoints,
+    gridSize,
+    bboxMin,
+    bboxMax,
+    onBboxUpdate
+  };
+
   if (name === 'book') {
     return Modelloading({
       url: './book/scene.gltf',
@@ -137,6 +145,15 @@ function Model({ name, controlPoints, gridSize, bboxMin, bboxMax, onBboxUpdate }
       onBboxUpdate: onBboxUpdate,
       scale: 0.3
     })
+  } else {
+    return <PrimitiveModel
+      name={name}
+      controlPoints={controlPoints}
+      gridSize={gridSize}
+      bboxMin={bboxMin}
+      bboxMax={bboxMax}
+      onBboxUpdate={onBboxUpdate}
+    />
   }
 }
 
@@ -389,6 +406,150 @@ function Modelloading({ url, controlPoints, gridSize, bboxMin, bboxMax, onBboxUp
   return deformedScene ? <primitive object={deformedScene} /> : null;
 }
 
+/**
+ * 用于加载和变形基本几何体（球体、立方体等）的组件
+ */
+function PrimitiveModel({ 
+  name, 
+  controlPoints, 
+  gridSize, 
+  bboxMin, 
+  bboxMax, 
+  onBboxUpdate 
+}) {
+  
+  // 1. 创建 "baked" (原始) 网格
+  //    我们使用 useMemo 来确保仅在 name 更改时才重新创建几何体
+  const bakedMesh = useMemo(() => {
+    // 为所有几何体创建一个共享材质
+    const material = new THREE.MeshPhysicalMaterial({
+      color: 0x2194ce,
+      metalness: 0.5,
+      roughness: 0.6,
+
+      emissive: 0x2194ce,         // 让它自己发出和颜色一样的光
+      emissiveIntensity: 0.5     // "发光"的强度
+    });
+    
+    let geometry = null;
+    if (name === 'sphere') {
+      geometry = new THREE.SphereGeometry(15, 64, 64);
+    } 
+    else if (name === 'cube') {
+      geometry = new THREE.BoxGeometry(20, 20, 20, 16, 16, 16);
+    } else if (name === 'cylinder') {
+      geometry = new THREE.CylinderGeometry( 10, 10, 30, 32, 8 );
+    } else if (name === 'donut') {
+      geometry = new THREE.TorusGeometry( 15, 6, 16, 100 );
+    }
+    else {
+      return null; // 如果 name 无效
+    }
+
+    const mesh = new THREE.Mesh(geometry, material);
+    return mesh;
+  }, [name]); // 仅当 'name' prop 改变时重新运行
+
+  // 2. 创建 "deformed" (变形) 网格
+  //    这是我们将实际修改并渲染的对象
+  const deformedMesh = useMemo(() => {
+    if (!bakedMesh) return null;
+    
+    // 克隆网格...
+    const mesh = bakedMesh.clone();
+    // ...并*深度克隆*其几何体，使其具有独立的顶点
+    mesh.geometry = bakedMesh.geometry.clone();
+    
+    return mesh;
+  }, [bakedMesh]);
+
+  // 3. 计算模型的精确包围盒
+  const modelBbox = useMemo(() => {
+    if (!bakedMesh) return null;
+    
+    // 基本几何体默认在原点，我们可以直接计算包围盒
+    bakedMesh.geometry.computeBoundingBox();
+    return bakedMesh.geometry.boundingBox;
+    
+  }, [bakedMesh]);
+
+  // 4. 当 modelBbox 计算出来后，通过回调通知父组件
+  useEffect(() => {
+    if (onBboxUpdate) {
+      onBboxUpdate(modelBbox);
+    }
+    
+    // [重要] 添加一个清理函数：
+    // 当此组件被卸载（例如切换模型）时,
+    // 它会通知 App 将 BBox 重置为 null。
+    return () => {
+      if (onBboxUpdate) {
+        onBboxUpdate(null);
+      }
+    };
+  }, [modelBbox, onBboxUpdate]);
+
+  // 5. 预计算 STU 坐标
+  const geometryData = useMemo(() => {
+    if (!bakedMesh || !bboxMin || !bboxMax) return null;
+
+    const stuList = [];
+    const originalVertex = new THREE.Vector3();
+
+    // 从 "bakedMesh" (只读源) 读取位置数据
+    const positionAttribute = bakedMesh.geometry.attributes.position;
+    const vertexCount = positionAttribute.count;
+    const stuArray = new Float32Array(vertexCount * 3);
+    
+    for (let j = 0; j < vertexCount; j++) {
+      originalVertex.fromBufferAttribute(positionAttribute, j);
+
+      // 注意：与 Modelloading 不同, 
+      // 基本几何体在局部空间中, 无需应用 worldMatrix
+      const [s, t, u] = calculateSTU(originalVertex, bboxMin, bboxMax);
+      stuArray[j * 3 + 0] = s;
+      stuArray[j * 3 + 1] = t;
+      stuArray[j * 3 + 2] = u;
+    }
+    
+    return new THREE.BufferAttribute(stuArray, 3);
+    
+  }, [bakedMesh, bboxMin, bboxMax]);
+
+  // 6. 核心变形逻辑 (useLayoutEffect)
+  useLayoutEffect(() => {
+    if (!deformedMesh || !geometryData || !controlPoints) {
+      return; 
+    }
+    
+    const stu = new THREE.Vector3();
+    const stuAttribute = geometryData; // 只有一个网格
+
+    const geometry = deformedMesh.geometry; 
+    const deformedPositionAttribute = geometry.attributes.position;
+    const vertexCount = stuAttribute.count;
+
+    for (let i = 0; i < vertexCount; i++) {
+      stu.fromBufferAttribute(stuAttribute, i);
+
+      const [newX, newY, newZ] = calculateDeformedPosition(
+        controlPoints, 
+        stu.x, stu.y, stu.z, 
+        gridSize
+      );
+      
+      deformedPositionAttribute.setXYZ(i, newX, newY, newZ);
+    }
+
+    deformedPositionAttribute.needsUpdate = true;
+    geometry.computeVertexNormals(); 
+    
+  }, [deformedMesh, controlPoints, geometryData, gridSize]);
+  
+  // 7. 渲染可变形的网格
+  return deformedMesh ? <primitive object={deformedMesh} /> : null;
+}
+
 // 假设我们有一个生成 FFD 控制点和线的函数
 function generateFFDControlGeometry(
   gridSize = [3, 3, 3], // 例如 [3,3,3] 代表一个立方体
@@ -596,12 +757,47 @@ function FFDControl({
   );
 }
 
+/**
+ * 一个跟随相机移动的点光源
+ */
+function CameraLight() {
+  // 1. 创建一个 ref 来引用 R3F 的灯光
+  const lightRef = useRef();
+  
+  // 2. 使用 useThree 钩子获取 R3F 的
+  //    'camera' (相机) 和 'scene' (场景) 实例
+  const { camera } = useThree();
+
+  // 3. 使用 useFrame 钩子，它会在每一帧渲染时执行
+  useFrame(() => {
+    if (lightRef.current) {
+      // 4. 将光源的世界坐标 (position)
+      //    设置为与相机的世界坐标完全相同
+      lightRef.current.position.copy(camera.position);
+    }
+  });
+
+  // 5. 返回一个点光源。
+  //    - 我们将它附加到 ref 上，以便在 useFrame 中访问它
+  //    - 'distance' 属性很重要，它决定了光能照多远
+  //    - 'intensity' 是光的强度
+  return (
+    <pointLight 
+      ref={lightRef} 
+      intensity={1000}  // 强度调高一些，作为"头灯"
+      distance={50}   // 确保光能照到你的模型 (你的相机在 30 远)
+      color={0xffffff} // 默认是白光
+    />
+  );
+}
+
 const DEFAULT_BBOXMIN = [-20, -20, -20];
 const DEFAULT_BBOXMAX = [20, 20, 20];
 
 function App() {
   // --- FFD 状态提升到 App 组件 ---
   const [gridSize, setGridSize] = useState([3, 3, 3]); // [ns, nt, nu]
+  const [modelName, setModelName] = useState('car');
   // NEW: 将 bboxMin 和 bboxMax 提升为 state
   const [bboxMin, setBboxMin] = useState(DEFAULT_BBOXMIN);
   const [bboxMax, setBboxMax] = useState(DEFAULT_BBOXMAX);
@@ -735,17 +931,39 @@ function App() {
         .reset-button:hover {
           background-color: #0056b3;
         }
+        .model-label {
+          display: block;
+          margin-bottom: 8px;
+          font-size: 14px;
+          color: #555;
+        }
+        .model-select {
+          width: 100%;
+          padding: 10px;
+          background-color: #fff;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+          font-size: 15px;
+          cursor: pointer;
+        }
+        .model-select:hover {
+          border-color: #999;
+        }
       `}</style>
 
       <div id="left-scene-container" style={{ flex: 7, backgroundColor: '#222' }}>
         <Canvas camera={{ position: [30, 30, 30], fov: 75 }} >
           <OrbitControls enabled={orbitEnabled} />
-          <ambientLight intensity={0.5} />
+
+          <ambientLight intensity={2.0} />
+          <pointLight position={[50, 50, 50]} intensity={300} distance={100} />
+          <CameraLight />
+
           <pointLight position={[10, 10, 10]} />
 
           {/* 传递 controlPoints 状态给 Model 组件 */}
           <Model
-            name='car'
+            name={modelName}
             controlPoints={controlPoints}
             gridSize={gridSize}
             bboxMin={bboxMin}
@@ -768,6 +986,27 @@ function App() {
       {/* --- 右侧控制面板 --- */}
       <div id="right-controls-container" style={{ flex: 3, padding: '20px', overflowY: 'auto', backgroundColor: '#f4f4f4', boxSizing: 'border-box' }}>
         
+        {/* --- (第 2 处修改) 将按钮组替换为下拉框 --- */}
+        <div className="control-group">
+          <h3>Load Model</h3>
+          <label htmlFor="model-select" className="model-label">
+            Choose a model:
+          </label>
+          <select
+            id="model-select"
+            className="model-select"
+            value={modelName}
+            onChange={(e) => setModelName(e.target.value)}
+          >
+            <option value="car">Car</option>
+            <option value="book">Book</option>
+            <option value="sphere">Sphere</option>
+            <option value="cube">Cube</option>
+            <option value="cylinder">Cylinder</option>
+            <option value="donut">Donut</option>
+          </select>
+        </div>
+
         {/* NEW: 晶格控制 */}
         <div className="control-group">
           <h3>FFD Lattice Controls</h3>
