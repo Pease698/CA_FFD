@@ -2,7 +2,11 @@
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
 
-you can try [online demo hosted on GitHub Pages](https://pease698.github.io/CA_FFD/)
+Referenced paper: [Free-Form Deformation of Solid Geometric Models](https://people.eecs.berkeley.edu/~sequin/CS285/PAPERS/Sederberg_Parry.pdf)
+
+This project is the final project for computer animation course in ZJU, referencing project [FreeFormDeformation](https://github.com/linwe2012/FreeFormDeformation?tab=readme-ov-file)
+
+You can try [online demo hosted on GitHub Pages](https://pease698.github.io/CA_FFD/)
 
 ## Available Scripts
 
