@@ -2,7 +2,7 @@
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
 
-you can try [online demo hosted on GitHub Pages](https://Pease698/github.io/CA_FFD)
+you can try [online demo hosted on GitHub Pages](https://pease698.github.io/CA_FFD/)
 
 ## Available Scripts
 
